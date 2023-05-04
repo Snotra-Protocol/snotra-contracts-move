@@ -20,7 +20,6 @@ module snotra_sui::nft_staking {
   const EINVALID_INDEX: u64 = 5;
   const EEXCEED_MAX_DAILY_REWARD: u64 = 6;
   const EINVALID_ADMIN: u64 = 7;
-  const EINVALID_DAILY_REWARD: u64 = 8;
 
   /// Constants
   const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -108,10 +107,6 @@ module snotra_sui::nft_staking {
     let sender = tx_context::sender(ctx);
     let cur_time = clock::timestamp_ms(clock);
     assert!(daily_reward < pool.max_daily_reward_per_nft, EEXCEED_MAX_DAILY_REWARD);
-
-    if (pool.is_rarity == 0) {
-      assert!(daily_reward == pool.daily_reward_per_nft, EINVALID_DAILY_REWARD);
-    };
 
     if (!ofield::exists_<address>(&pool.id, sender)) {
       ofield::add(&mut pool.id, sender, UserInfo<NftT> {
