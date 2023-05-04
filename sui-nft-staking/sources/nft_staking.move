@@ -25,10 +25,13 @@ module snotra_sui::nft_staking {
   const EINVALID_ADMIN: u64 = 7;
   const EINVALID_DAILY_REWARD: u64 = 8;
   const EINVALID_SIGNATURE: u64 = 9;
+  const ESTILL_LOCKED: u64 = 10;
+  const EPOOL_ENDED: u64 = 11;
 
   /// Constants
   const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
+  /// Objects
   struct AdminCap has key {
     id: UID,
   }
@@ -60,6 +63,7 @@ module snotra_sui::nft_staking {
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
     is_rarity: u8,
+    creation_time: u64,
     lock_duration: u64, // 0: flexible, otherwise: duration
     stake_nonce: u64,
     total_staked_count: u64,
@@ -73,6 +77,8 @@ module snotra_sui::nft_staking {
     nft_type: ascii::String,
     reward_coin_type: ascii::String,
     is_rarity: u8,
+    creation_time: u64,
+    lock_duration: u64,
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
     initial_reward_amt: u64,
@@ -122,6 +128,7 @@ module snotra_sui::nft_staking {
     lock_duration: u64,
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
+    clock: &Clock,
     ctx: &mut TxContext, 
   ) {
 
@@ -135,6 +142,7 @@ module snotra_sui::nft_staking {
       daily_reward_per_nft,
       max_daily_reward_per_nft,
       is_rarity,
+      creation_time: cur_time,
       lock_duration,
       total_staked_count: 0,
       total_claimed_reward: 0,
@@ -157,6 +165,8 @@ module snotra_sui::nft_staking {
       nft_type: *type_name::borrow_string(&type_name::get<NftT>()),
       reward_coin_type: *type_name::borrow_string(&type_name::get<RewardCoinT>()),
       is_rarity,
+      creation_time: cur_time,
+      lock_duration,
       daily_reward_per_nft,
       max_daily_reward_per_nft,
       initial_reward_amt,
@@ -166,6 +176,7 @@ module snotra_sui::nft_staking {
     transfer::share_object(pool);
   }
   
+  /// function to verify daily_reward signature
   public fun verify_reward_sig(daily_reward: u64, reward_nonce: u64, verify_pk: vector<u8>, signature: vector<u8>): bool {
     let sign_data = std::bcs::to_bytes(&daily_reward);
     let nonce_bytes = std::bcs::to_bytes(&reward_nonce);
@@ -181,6 +192,7 @@ module snotra_sui::nft_staking {
     verify
   }
 
+  /// staker stake nft
   public entry fun stake_nft<RewardCoinT, NftT: key + store>(
     platform: &PlatformInfo,
     pool: &mut PoolInfo<RewardCoinT, NftT>,
@@ -193,6 +205,11 @@ module snotra_sui::nft_staking {
     
     let sender = tx_context::sender(ctx);
     let cur_time = clock::timestamp_ms(clock);
+
+    // if duration is not flexible
+    if (pool.lock_duration > 0) {
+      assert!(pool.creation_time + pool.lock_duration > cur_time, EPOOL_ENDED);
+    };
 
     assert!(daily_reward < pool.max_daily_reward_per_nft, EEXCEED_MAX_DAILY_REWARD);
     assert!(verify_reward_sig(daily_reward, pool.stake_nonce, platform.sig_verify_pk, daily_reward_signature) == true, EINVALID_SIGNATURE);
@@ -247,7 +264,16 @@ module snotra_sui::nft_staking {
     let cur_time = clock::timestamp_ms(clock);
 
     assert!(ofield::exists_<address>(&pool.id, sender) == true, EINVALID_OWNER);
-  
+
+    // lock duration check
+    let pool_end_time: u64 = 0;
+    
+    // if duration is not flexible
+    if (pool.lock_duration > 0) {
+      pool_end_time = pool.creation_time + pool.lock_duration;
+      assert!(pool_end_time <= cur_time, ESTILL_LOCKED);
+    };
+
     // check nft availability and calculate the reward
     let user_info = ofield::borrow_mut<address, UserInfo<NftT>>(&mut pool.id, sender);
     let nft_count = vector::length(&user_info.nfts);
@@ -258,7 +284,7 @@ module snotra_sui::nft_staking {
     assert!(nft_id_to_unstake == nft_id, EINVALID_NFTID_OR_INDEX);
 
     // calculate the reward
-    let reward = get_reward(nft_info_to_unstake, user_info.last_reward_claim_time, cur_time);
+    let reward = get_reward(nft_info_to_unstake, user_info.last_reward_claim_time, cur_time, pool_end_time);
     user_info.pending_reward = user_info.pending_reward + reward;
 
     // remove the nft from vector
@@ -288,18 +314,25 @@ module snotra_sui::nft_staking {
   /// 2. second case (stake_time > last_reward_time)
   /// ---------------------||----------||----------------------||
   ///              last_reward_time  stake_time               current_time
-  fun get_reward<NftT: key + store>(nft_stake_info: &NftStakeInfo<NftT>, last_reward_claim_time: u64, current_time: u64) : u64 {
-    assert!(last_reward_claim_time <= current_time, EINVALID_TIME);
-    assert!(nft_stake_info.stake_time <= current_time, EINVALID_TIME);
+  fun get_reward<NftT: key + store>(nft_stake_info: &NftStakeInfo<NftT>, last_reward_claim_time: u64, current_time: u64, pool_end_time: u64) : u64 {
+    let base_time = current_time;
+    // not flexible but the pool is ended at the moment
+    if (pool_end_time > 0 && current_time > pool_end_time)
+      base_time = pool_end_time;
+
+    // this is invalid case
+    assert!(nft_stake_info.stake_time <= base_time, EINVALID_TIME);
+
+    if (last_reward_claim_time > base_time) return 0;
 
     let calculated_reward: u64;
 
     // 1. first case
     if (nft_stake_info.stake_time < last_reward_claim_time) {
-      let duration = current_time - last_reward_claim_time;
+      let duration = base_time - last_reward_claim_time;
       calculated_reward = duration * nft_stake_info.daily_reward / SECONDS_PER_DAY;
     } else { // 2. second case
-      let duration = current_time - nft_stake_info.stake_time;
+      let duration = base_time - nft_stake_info.stake_time;
       calculated_reward = duration * nft_stake_info.daily_reward / SECONDS_PER_DAY;
     };
 
@@ -313,13 +346,20 @@ module snotra_sui::nft_staking {
     let nft_count = vector::length(&user_info.nfts);
     let index = 0;
     let reward_sum = user_info.pending_reward;
+
+    let pool_end_time: u64 = 0;
+    if (pool.lock_duration > 0) {
+      pool_end_time = pool.creation_time + pool.lock_duration;
+    };
+
     while (index < nft_count) {
-      reward_sum = reward_sum + get_reward<NftT>(vector::borrow(&user_info.nfts, index), user_info.last_reward_claim_time, cur_time);
+      reward_sum = reward_sum + get_reward<NftT>(vector::borrow(&user_info.nfts, index), user_info.last_reward_claim_time, cur_time, pool_end_time);
       index = index + 1;
     };
     reward_sum
   }
 
+  /// staker claim rewards
   public entry fun claim_reward<RewardCoinT, NftT: key + store>(
     pool: &mut PoolInfo<RewardCoinT, NftT>,
     clock: &Clock,

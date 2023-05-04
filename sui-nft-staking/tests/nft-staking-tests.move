@@ -108,6 +108,10 @@ module snotra_sui::nft_staking_tests {
     let singer_public_key = x"66f7b2553f81cc9015b4ee3ffd3b3f607b2af5398f3889319e669f9db28429f6";
     // let bob = @0xB;
     let scenario_val = test_scenario::begin(alice);
+    
+    let daily_reward = 10_000_000_000;
+    let daily_reward_sig = x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a";
+    
     let scenario = &mut scenario_val;
     {
       let ctx = test_scenario::ctx(scenario);
@@ -129,6 +133,7 @@ module snotra_sui::nft_staking_tests {
       let admin_cap = test_scenario::take_from_sender<AdminCap>(scenario);
       let platformInfo = test_scenario::take_shared<PlatformInfo>(scenario);
       let ctx = test_scenario::ctx(scenario);
+      let clock_obj = clock::create_for_testing(ctx);
       nft_staking::change_verify_pk(
         &mut platformInfo,
         &admin_cap,
@@ -141,11 +146,14 @@ module snotra_sui::nft_staking_tests {
         reward_coin,
         1000000_000_000_000,
         1,
+        0, // flexible
         10_000_000_000,
         1000_000_000_000,
+        &clock_obj,
         ctx
       );
       mint_nft_a(alice, scenario);
+      clock::destroy_for_testing(clock_obj);
       test_scenario::return_to_sender(scenario, admin_cap);
       test_scenario::return_shared<PlatformInfo>(platformInfo);
     };
@@ -162,8 +170,7 @@ module snotra_sui::nft_staking_tests {
       let ctx = test_scenario::ctx(scenario);
 
       let clock_obj = clock::create_for_testing(ctx);
-      let daily_reward = 10_000_000_000;
-      let daily_reward_sig = x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a";
+      
       nft_staking::stake_nft<NFT_STAKING_TESTS, NftA>(
         &platformInfo,
         &mut poolInfo,
@@ -204,6 +211,9 @@ module snotra_sui::nft_staking_tests {
       std::debug::print<String>(&string::utf8(b"after claim"));
       let reward_coin = test_scenario::take_from_sender<Coin<NFT_STAKING_TESTS>>(scenario);
       std::debug::print<u64>(&coin::value<NFT_STAKING_TESTS>(&reward_coin));
+      
+      assert!(coin::value<NFT_STAKING_TESTS>(&reward_coin) == 3600 * 5 * daily_reward / 86400, 0);
+
       test_scenario::return_to_sender(scenario, reward_coin);
 
       let pool_info = test_scenario::take_shared<PoolInfo<NFT_STAKING_TESTS, NftA>>(scenario);
@@ -316,16 +326,20 @@ module snotra_sui::nft_staking_tests {
     {
       let admin_cap = test_scenario::take_from_sender<AdminCap>(scenario);
       let ctx = test_scenario::ctx(scenario);
+      let clock_obj = clock::create_for_testing(ctx);
       nft_staking::create_pool<NFT_STAKING_TESTS, NftA>(
         &admin_cap,
         alice,
         reward_coin,
         1000000_000_000_000,
         1,
+        0, // lock_duration
         10_000_000_000,
         1000_000_000_000,
+        &clock_obj,
         ctx
       );
+      clock::destroy_for_testing(clock_obj);
       test_scenario::return_to_sender(scenario, admin_cap);
     };
 
