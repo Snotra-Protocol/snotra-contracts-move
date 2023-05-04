@@ -1,17 +1,20 @@
 module snotra_sui::nft_staking {
   
-  use sui::clock::{Self, Clock};
-  // use std::string::{Self, String};
+  use std::ascii;
   use std::vector;
+  use std::type_name;
+
+  use sui::clock::{Self, Clock};
   use sui::coin::{Self, Coin};
   use sui::balance::{Self, Balance};
   use sui::object::{Self, ID, UID};
   use sui::transfer;
   use sui::tx_context::{Self, TxContext};
   use sui::pay;
-  // use sui::ed25519;
-  
+  use sui::ed25519;
+  use sui::event;
   use sui::dynamic_object_field as ofield;
+
   /// Errors
   const EINVALID_OWNER: u64 = 1;
   const EESCROW_ALREADY_INITED: u64 = 2;
@@ -21,12 +24,18 @@ module snotra_sui::nft_staking {
   const EEXCEED_MAX_DAILY_REWARD: u64 = 6;
   const EINVALID_ADMIN: u64 = 7;
   const EINVALID_DAILY_REWARD: u64 = 8;
+  const EINVALID_SIGNATURE: u64 = 9;
 
   /// Constants
   const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
   struct AdminCap has key {
-    id: UID
+    id: UID,
+  }
+
+  struct PlatformInfo has key {
+    id: UID,
+    sig_verify_pk: vector<u8>,
   }
 
   struct NftStakeInfo<NftT: key + store> has store {
@@ -51,26 +60,72 @@ module snotra_sui::nft_staking {
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
     is_rarity: u8,
+    lock_duration: u64, // 0: flexible, otherwise: duration
+    stake_nonce: u64,
     total_staked_count: u64,
     total_claimed_reward: u64
+  }
+
+  /// events
+  struct PoolCreated has copy, drop {
+    pool_id: ID,
+    creator: address,
+    nft_type: ascii::String,
+    reward_coin_type: ascii::String,
+    is_rarity: u8,
+    daily_reward_per_nft: u64,
+    max_daily_reward_per_nft: u64,
+    initial_reward_amt: u64,
+  }
+
+  struct NftStaked has copy, drop {
+    nft_id: ID,
+    pool_id: ID,
+    owner: address,
+    nft_type: ascii::String,
+    reward_coin_type: ascii::String,
+    daily_reward: u64,
+  }
+
+  struct NftUnStaked has copy, drop {
+    nft_id: ID,
+    pool_id: ID,
+    owner: address,
+    nft_type: ascii::String,
+    reward_coin_type: ascii::String
+  }
+
+  struct ClaimedReward has copy, drop {
+    owner: address,
+    pool_id: ID,
+    claimed_amount: u64,
   }
 
   fun init(ctx: &mut TxContext) {
     let sender = tx_context::sender(ctx);
     transfer::transfer(AdminCap { id: object::new(ctx) }, sender);
+    transfer::share_object(
+      PlatformInfo {
+        id: object::new(ctx),
+        sig_verify_pk: vector::empty<u8>()
+      }
+    );
   }
 
   /// create pool for specified Nft Collection and reward coins
   public entry fun create_pool<RewardCoinT, NftT: key + store>(
+    _admin_cap: &AdminCap,
     creator_address: address,
     deposit_reward_coin: Coin<RewardCoinT>,
     initial_reward_amt: u64,
     is_rarity: u8,
+    lock_duration: u64,
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
     ctx: &mut TxContext, 
   ) {
 
+    let cur_time = clock::timestamp_ms(clock);
     let sender = tx_context::sender(ctx);
 
     let pool = PoolInfo<RewardCoinT, NftT> {
@@ -80,8 +135,10 @@ module snotra_sui::nft_staking {
       daily_reward_per_nft,
       max_daily_reward_per_nft,
       is_rarity,
+      lock_duration,
       total_staked_count: 0,
-      total_claimed_reward: 0
+      total_claimed_reward: 0,
+      stake_nonce: 0
     };
 
     // transfer reward
@@ -93,21 +150,52 @@ module snotra_sui::nft_staking {
     };
     balance::join(&mut pool.reward_coin, deposit_reward_balance);
 
+    // event
+    event::emit(PoolCreated {
+      pool_id: object::id(&pool),
+      creator: sender,
+      nft_type: *type_name::borrow_string(&type_name::get<NftT>()),
+      reward_coin_type: *type_name::borrow_string(&type_name::get<RewardCoinT>()),
+      is_rarity,
+      daily_reward_per_nft,
+      max_daily_reward_per_nft,
+      initial_reward_amt,
+    });
+
     // share pool object
     transfer::share_object(pool);
   }
   
+  public fun verify_reward_sig(daily_reward: u64, reward_nonce: u64, verify_pk: vector<u8>, signature: vector<u8>): bool {
+    let sign_data = std::bcs::to_bytes(&daily_reward);
+    let nonce_bytes = std::bcs::to_bytes(&reward_nonce);
+    vector::append(&mut sign_data, nonce_bytes);
+
+    std::debug::print<vector<u8>>(&sign_data);
+
+    let verify = ed25519::ed25519_verify(
+      &signature, 
+      &verify_pk, 
+      &sign_data
+    );
+    verify
+  }
+
   public entry fun stake_nft<RewardCoinT, NftT: key + store>(
+    platform: &PlatformInfo,
     pool: &mut PoolInfo<RewardCoinT, NftT>,
     nft_obj: NftT,
     daily_reward: u64,
+    daily_reward_signature: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
     
     let sender = tx_context::sender(ctx);
     let cur_time = clock::timestamp_ms(clock);
+
     assert!(daily_reward < pool.max_daily_reward_per_nft, EEXCEED_MAX_DAILY_REWARD);
+    assert!(verify_reward_sig(daily_reward, pool.stake_nonce, platform.sig_verify_pk, daily_reward_signature) == true, EINVALID_SIGNATURE);
 
     if (pool.is_rarity == 0) {
       assert!(daily_reward == pool.daily_reward_per_nft, EINVALID_DAILY_REWARD);
@@ -125,6 +213,7 @@ module snotra_sui::nft_staking {
 
     let user_info = ofield::borrow_mut<address, UserInfo<NftT>>(&mut pool.id, sender);
 
+    let nft_id = object::id(&nft_obj);
     vector::push_back(&mut user_info.nfts, NftStakeInfo<NftT> {
       nft: nft_obj,
       stake_time: cur_time,
@@ -133,6 +222,17 @@ module snotra_sui::nft_staking {
 
     // update pool info
     pool.total_staked_count = pool.total_staked_count + 1;
+    pool.stake_nonce = pool.stake_nonce + 1;
+
+    // emit event
+    event::emit(NftStaked {
+      nft_id,
+      pool_id: object::id(pool),
+      owner: sender,
+      nft_type: *type_name::borrow_string(&type_name::get<NftT>()),
+      reward_coin_type: *type_name::borrow_string(&type_name::get<RewardCoinT>()),
+      daily_reward
+    });
   }
 
   /// unstake NFT from the pool
@@ -165,11 +265,20 @@ module snotra_sui::nft_staking {
     let nft_info_to_unstake = vector::swap_remove(&mut user_info.nfts, nft_index);
     let NftStakeInfo { nft, stake_time: _, daily_reward: _ } = nft_info_to_unstake;
 
-    // transfer nft to sender
-    transfer::public_transfer(nft, sender);
-
     // update pool info
     pool.total_staked_count = pool.total_staked_count - 1;
+
+    // emit event
+    event::emit(NftUnStaked {
+      nft_id: object::id(&nft),
+      pool_id: object::id(pool),
+      owner: sender,
+      nft_type: *type_name::borrow_string(&type_name::get<NftT>()),
+      reward_coin_type: *type_name::borrow_string(&type_name::get<RewardCoinT>())
+    });
+
+    // transfer nft to sender
+    transfer::public_transfer(nft, sender);
   }
 
   /// calculate reward of staked nft
@@ -238,6 +347,13 @@ module snotra_sui::nft_staking {
 
     // update pool info
     pool.total_claimed_reward = pool.total_claimed_reward + reward_sum;
+    
+    // emit event
+    event::emit(ClaimedReward {
+      owner: sender,
+      pool_id: object::id(pool),
+      claimed_amount: reward_sum
+    });
   }
 
   public entry fun withdraw_reward<RewardCoinT, NftT: key + store>(
@@ -251,12 +367,21 @@ module snotra_sui::nft_staking {
     pay::keep(reward_to_withdraw, ctx);
   }
 
-  public entry fun change_admin<RewardCoinT, NftT: key + store>(
+  public entry fun change_admin(
     admin_cap: AdminCap,
     new_admin: address,
     _ctx: &mut TxContext, 
   ){
     transfer::transfer(admin_cap, new_admin);
+  }
+
+  public entry fun change_verify_pk(
+    platform: &mut PlatformInfo,
+    _admin_cap: &AdminCap,
+    new_verify_pk: vector<u8>,
+    _ctx: &mut TxContext, 
+  ){
+    platform.sig_verify_pk = new_verify_pk;
   }
 
   #[test_only]
