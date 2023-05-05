@@ -9,6 +9,7 @@ module snotra_sui::nft_staking_tests {
   use sui::url::{Self, Url};
   use sui::pay::{Self};
   use sui::dynamic_object_field as ofield;
+  use sui::sui::SUI;
 
   use std::string::{Self, String};
   use std::option;
@@ -111,7 +112,8 @@ module snotra_sui::nft_staking_tests {
     
     let daily_reward = 10_000_000_000;
     let daily_reward_sig = x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a";
-    
+    let stake_fee_amount = 0;
+
     let scenario = &mut scenario_val;
     {
       let ctx = test_scenario::ctx(scenario);
@@ -149,6 +151,7 @@ module snotra_sui::nft_staking_tests {
         0, // flexible
         10_000_000_000,
         1000_000_000_000,
+        stake_fee_amount,
         &clock_obj,
         ctx
       );
@@ -172,11 +175,12 @@ module snotra_sui::nft_staking_tests {
       let clock_obj = clock::create_for_testing(ctx);
       
       nft_staking::stake_nft<NFT_STAKING_TESTS, NftA>(
-        &platformInfo,
+        &mut platformInfo,
         &mut poolInfo,
         nftA,
         daily_reward,
         daily_reward_sig,
+        coin::zero<SUI>(ctx),
         &clock_obj,
         ctx
       );
@@ -216,6 +220,8 @@ module snotra_sui::nft_staking_tests {
 
       test_scenario::return_to_sender(scenario, reward_coin);
 
+      let platformInfo = test_scenario::take_shared<PlatformInfo>(scenario);
+
       let pool_info = test_scenario::take_shared<PoolInfo<NFT_STAKING_TESTS, NftA>>(scenario);
       std::debug::print<PoolInfo<NFT_STAKING_TESTS, NftA>>(&pool_info);
 
@@ -229,15 +235,18 @@ module snotra_sui::nft_staking_tests {
       clock::increment_for_testing(&mut clock_obj, 300); // increase 300 seconds
 
       nft_staking::unstake_nft<NFT_STAKING_TESTS, NftA>(
+        &mut platformInfo,
         &mut pool_info,
         nft_a_id,
         0,
+        coin::zero<SUI>(ctx),
         &clock_obj,
         ctx
       );
 
       clock::destroy_for_testing(clock_obj);
       test_scenario::return_shared<PoolInfo<NFT_STAKING_TESTS, NftA>>(pool_info);
+      test_scenario::return_shared<PlatformInfo>(platformInfo);
     };
 
     // check unstaked status & claim remained rewards
@@ -306,6 +315,7 @@ module snotra_sui::nft_staking_tests {
   public fun test_admin_transfer_ownership_and_withdraw() {
     let alice = @0xA;
     let bob = @0xB;
+    let stake_fee_amount = 0;
     let scenario_val = test_scenario::begin(alice);
     let scenario = &mut scenario_val;
     {
@@ -336,6 +346,7 @@ module snotra_sui::nft_staking_tests {
         0, // lock_duration
         10_000_000_000,
         1000_000_000_000,
+        stake_fee_amount,
         &clock_obj,
         ctx
       );

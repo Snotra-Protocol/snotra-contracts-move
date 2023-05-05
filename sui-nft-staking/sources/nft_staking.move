@@ -14,6 +14,7 @@ module snotra_sui::nft_staking {
   use sui::ed25519;
   use sui::event;
   use sui::dynamic_object_field as ofield;
+  use sui::sui::SUI;
 
   /// Errors
   const EINVALID_OWNER: u64 = 1;
@@ -27,6 +28,7 @@ module snotra_sui::nft_staking {
   const EINVALID_SIGNATURE: u64 = 9;
   const ESTILL_LOCKED: u64 = 10;
   const EPOOL_ENDED: u64 = 11;
+  const EINSUFFICIENT_FEE_AMOUNT: u64 = 12;
 
   /// Constants
   const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -38,6 +40,7 @@ module snotra_sui::nft_staking {
 
   struct PlatformInfo has key {
     id: UID,
+    platform_fee: Balance<SUI>,
     sig_verify_pk: vector<u8>,
   }
 
@@ -67,7 +70,8 @@ module snotra_sui::nft_staking {
     lock_duration: u64, // 0: flexible, otherwise: duration
     stake_nonce: u64,
     total_staked_count: u64,
-    total_claimed_reward: u64
+    total_claimed_reward: u64,
+    stake_fee_amount: u64,
   }
 
   /// events
@@ -113,7 +117,8 @@ module snotra_sui::nft_staking {
     transfer::share_object(
       PlatformInfo {
         id: object::new(ctx),
-        sig_verify_pk: vector::empty<u8>()
+        sig_verify_pk: vector::empty<u8>(),
+        platform_fee: balance::zero<SUI>()
       }
     );
   }
@@ -128,6 +133,7 @@ module snotra_sui::nft_staking {
     lock_duration: u64,
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
+    stake_fee_amount: u64,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -146,7 +152,8 @@ module snotra_sui::nft_staking {
       lock_duration,
       total_staked_count: 0,
       total_claimed_reward: 0,
-      stake_nonce: 0
+      stake_nonce: 0,
+      stake_fee_amount
     };
 
     // transfer reward
@@ -194,11 +201,12 @@ module snotra_sui::nft_staking {
 
   /// staker stake nft
   public entry fun stake_nft<RewardCoinT, NftT: key + store>(
-    platform: &PlatformInfo,
+    platform: &mut PlatformInfo,
     pool: &mut PoolInfo<RewardCoinT, NftT>,
     nft_obj: NftT,
     daily_reward: u64,
     daily_reward_signature: vector<u8>,
+    sui_fee: Coin<SUI>,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -214,10 +222,31 @@ module snotra_sui::nft_staking {
     assert!(daily_reward < pool.max_daily_reward_per_nft, EEXCEED_MAX_DAILY_REWARD);
     assert!(verify_reward_sig(daily_reward, pool.stake_nonce, platform.sig_verify_pk, daily_reward_signature) == true, EINVALID_SIGNATURE);
 
+    // check daily reward
     if (pool.is_rarity == 0) {
       assert!(daily_reward == pool.daily_reward_per_nft, EINVALID_DAILY_REWARD);
     };
 
+    // cut stake fee
+    if (pool.stake_fee_amount > 0) {
+      let fee_amount = coin::value(&sui_fee);
+      let fee_balance_obj = coin::into_balance(sui_fee);
+      
+      assert!(fee_amount >= pool.stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
+      
+      if (fee_amount > pool.stake_fee_amount) {
+        // if fee coin object is bigger than stake_fee_amount, please return rest of the money to the sender
+        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, fee_amount - pool.stake_fee_amount, ctx);
+        transfer::public_transfer(coins_to_return, sender);
+      };
+
+      balance::join(&mut platform.platform_fee, fee_balance_obj);
+    } else {
+      // should return sui coin
+      pay::keep(sui_fee, ctx);
+    };
+
+    // check if sender is already a staker
     if (!ofield::exists_<address>(&pool.id, sender)) {
       ofield::add(&mut pool.id, sender, UserInfo<NftT> {
         id: object::new(ctx),
@@ -254,9 +283,11 @@ module snotra_sui::nft_staking {
 
   /// unstake NFT from the pool
   public entry fun unstake_nft<RewardCoinT, NftT: key + store>(
+    platform: &mut PlatformInfo,
     pool: &mut PoolInfo<RewardCoinT, NftT>,
     nft_id: ID,
     nft_index: u64,
+    sui_fee: Coin<SUI>,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -272,6 +303,25 @@ module snotra_sui::nft_staking {
     if (pool.lock_duration > 0) {
       pool_end_time = pool.creation_time + pool.lock_duration;
       assert!(pool_end_time <= cur_time, ESTILL_LOCKED);
+    };
+
+    // cut unstake fee
+    if (pool.stake_fee_amount > 0) {
+      let fee_amount = coin::value(&sui_fee);
+      let fee_balance_obj = coin::into_balance(sui_fee);
+      
+      assert!(fee_amount >= pool.stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
+      
+      if (fee_amount > pool.stake_fee_amount) {
+        // if fee coin object is bigger than stake_fee_amount, please return rest of the money to the sender
+        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, fee_amount - pool.stake_fee_amount, ctx);
+        transfer::public_transfer(coins_to_return, sender);
+      };
+
+      balance::join(&mut platform.platform_fee, fee_balance_obj);
+    }  else {
+      // should return sui coin
+      pay::keep(sui_fee, ctx);
     };
 
     // check nft availability and calculate the reward
@@ -396,6 +446,7 @@ module snotra_sui::nft_staking {
     });
   }
 
+  /// admin can withdraw remained reward from the pool
   public entry fun withdraw_reward<RewardCoinT, NftT: key + store>(
     _admin_cap: &AdminCap,
     pool: &mut PoolInfo<RewardCoinT, NftT>,
@@ -407,6 +458,7 @@ module snotra_sui::nft_staking {
     pay::keep(reward_to_withdraw, ctx);
   }
 
+  /// admin can transfer ownership to new admin
   public entry fun change_admin(
     admin_cap: AdminCap,
     new_admin: address,
@@ -415,6 +467,7 @@ module snotra_sui::nft_staking {
     transfer::transfer(admin_cap, new_admin);
   }
 
+  /// admin can change the public key of SingatureMaker
   public entry fun change_verify_pk(
     platform: &mut PlatformInfo,
     _admin_cap: &AdminCap,
@@ -422,6 +475,29 @@ module snotra_sui::nft_staking {
     _ctx: &mut TxContext, 
   ){
     platform.sig_verify_pk = new_verify_pk;
+  }
+
+  /// admin can change the stake/unstake fee for specific pools
+  /// the NFTs in the pool might be the partnership NFT collection.
+  public entry fun change_stake_fee<RewardCoinT, NftT>(
+    _admin_cap: &AdminCap,
+    pool: &mut PoolInfo<RewardCoinT, NftT>,
+    new_stake_fee: u64,
+    _ctx: &mut TxContext, 
+  ){
+    pool.stake_fee_amount = new_stake_fee;
+  }
+
+  /// admin can withdraw remained reward from the pool
+  public entry fun withdraw_platform_fee(
+    platform: &mut PlatformInfo,
+    _admin_cap: &AdminCap,
+    ctx: &mut TxContext, 
+  ){
+    // transfer reward_coin to claimer
+    let accumulated_fee_amount = balance::value(&platform.platform_fee);
+    let fee_to_withdraw: Coin<SUI> = coin::take(&mut platform.platform_fee, accumulated_fee_amount, ctx);
+    pay::keep(fee_to_withdraw, ctx);
   }
 
   #[test_only]
