@@ -70,8 +70,7 @@ module snotra_sui::nft_staking {
     lock_duration: u64, // 0: flexible, otherwise: duration
     stake_nonce: u64,
     total_staked_count: u64,
-    total_claimed_reward: u64,
-    stake_fee_amount: u64,
+    total_claimed_reward: u64
   }
 
   /// events
@@ -133,7 +132,6 @@ module snotra_sui::nft_staking {
     lock_duration: u64,
     daily_reward_per_nft: u64,
     max_daily_reward_per_nft: u64,
-    stake_fee_amount: u64,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -152,8 +150,7 @@ module snotra_sui::nft_staking {
       lock_duration,
       total_staked_count: 0,
       total_claimed_reward: 0,
-      stake_nonce: 0,
-      stake_fee_amount
+      stake_nonce: 0
     };
 
     // transfer reward
@@ -184,9 +181,9 @@ module snotra_sui::nft_staking {
   }
   
   /// function to verify daily_reward signature
-  public fun verify_reward_sig(daily_reward: u64, reward_nonce: u64, verify_pk: vector<u8>, signature: vector<u8>): bool {
-    let sign_data = std::bcs::to_bytes(&daily_reward);
-    let nonce_bytes = std::bcs::to_bytes(&reward_nonce);
+  public fun verify_signature(main_value: u64, nonce_value: u64, verify_pk: vector<u8>, signature: vector<u8>): bool {
+    let sign_data = std::bcs::to_bytes(&main_value);
+    let nonce_bytes = std::bcs::to_bytes(&nonce_value);
     vector::append(&mut sign_data, nonce_bytes);
 
     std::debug::print<vector<u8>>(&sign_data);
@@ -207,6 +204,8 @@ module snotra_sui::nft_staking {
     daily_reward: u64,
     daily_reward_signature: vector<u8>,
     sui_fee: Coin<SUI>,
+    stake_fee_amount: u64,
+    stake_fee_amount_signature: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -220,24 +219,27 @@ module snotra_sui::nft_staking {
     };
 
     assert!(daily_reward < pool.max_daily_reward_per_nft, EEXCEED_MAX_DAILY_REWARD);
-    assert!(verify_reward_sig(daily_reward, pool.stake_nonce, platform.sig_verify_pk, daily_reward_signature) == true, EINVALID_SIGNATURE);
+    assert!(verify_signature(daily_reward, pool.stake_nonce, platform.sig_verify_pk, daily_reward_signature) == true, EINVALID_SIGNATURE);
 
     // check daily reward
     if (pool.is_rarity == 0) {
       assert!(daily_reward == pool.daily_reward_per_nft, EINVALID_DAILY_REWARD);
     };
 
+    // verify fee_amount
+    assert!(verify_signature(stake_fee_amount, pool.stake_nonce, platform.sig_verify_pk, stake_fee_amount_signature) == true, EINVALID_SIGNATURE);
+
     // cut stake fee
-    if (pool.stake_fee_amount > 0) {
-      let fee_amount = coin::value(&sui_fee);
+    if (stake_fee_amount > 0) {
+      let obj_sui_amount = coin::value(&sui_fee);
       let fee_balance_obj = coin::into_balance(sui_fee);
       
-      assert!(fee_amount >= pool.stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
+      assert!(obj_sui_amount >= stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
       
-      if (fee_amount > pool.stake_fee_amount) {
+      if (obj_sui_amount > stake_fee_amount) {
         // if fee coin object is bigger than stake_fee_amount, please return rest of the money to the sender
-        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, fee_amount - pool.stake_fee_amount, ctx);
-        transfer::public_transfer(coins_to_return, sender);
+        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, obj_sui_amount - stake_fee_amount, ctx);
+        pay::keep(coins_to_return, ctx);
       };
 
       balance::join(&mut platform.platform_fee, fee_balance_obj);
@@ -288,6 +290,8 @@ module snotra_sui::nft_staking {
     nft_id: ID,
     nft_index: u64,
     sui_fee: Coin<SUI>,
+    stake_fee_amount: u64,
+    stake_fee_amount_signature: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext, 
   ) {
@@ -305,21 +309,24 @@ module snotra_sui::nft_staking {
       assert!(pool_end_time <= cur_time, ESTILL_LOCKED);
     };
 
-    // cut unstake fee
-    if (pool.stake_fee_amount > 0) {
-      let fee_amount = coin::value(&sui_fee);
+    // verify fee_amount
+    assert!(verify_signature(stake_fee_amount, pool.stake_nonce, platform.sig_verify_pk, stake_fee_amount_signature) == true, EINVALID_SIGNATURE);
+
+    // cut stake fee
+    if (stake_fee_amount > 0) {
+      let obj_sui_amount = coin::value(&sui_fee);
       let fee_balance_obj = coin::into_balance(sui_fee);
       
-      assert!(fee_amount >= pool.stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
+      assert!(obj_sui_amount >= stake_fee_amount, EINSUFFICIENT_FEE_AMOUNT);
       
-      if (fee_amount > pool.stake_fee_amount) {
+      if (obj_sui_amount > stake_fee_amount) {
         // if fee coin object is bigger than stake_fee_amount, please return rest of the money to the sender
-        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, fee_amount - pool.stake_fee_amount, ctx);
-        transfer::public_transfer(coins_to_return, sender);
+        let coins_to_return: Coin<SUI> = coin::take(&mut fee_balance_obj, obj_sui_amount - stake_fee_amount, ctx);
+        pay::keep(coins_to_return, ctx);
       };
 
       balance::join(&mut platform.platform_fee, fee_balance_obj);
-    }  else {
+    } else {
       // should return sui coin
       pay::keep(sui_fee, ctx);
     };
@@ -343,6 +350,7 @@ module snotra_sui::nft_staking {
 
     // update pool info
     pool.total_staked_count = pool.total_staked_count - 1;
+    pool.stake_nonce = pool.stake_nonce + 1;
 
     // emit event
     event::emit(NftUnStaked {
@@ -475,17 +483,6 @@ module snotra_sui::nft_staking {
     _ctx: &mut TxContext, 
   ){
     platform.sig_verify_pk = new_verify_pk;
-  }
-
-  /// admin can change the stake/unstake fee for specific pools
-  /// the NFTs in the pool might be the partnership NFT collection.
-  public entry fun change_stake_fee<RewardCoinT, NftT>(
-    _admin_cap: &AdminCap,
-    pool: &mut PoolInfo<RewardCoinT, NftT>,
-    new_stake_fee: u64,
-    _ctx: &mut TxContext, 
-  ){
-    pool.stake_fee_amount = new_stake_fee;
   }
 
   /// admin can withdraw remained reward from the pool

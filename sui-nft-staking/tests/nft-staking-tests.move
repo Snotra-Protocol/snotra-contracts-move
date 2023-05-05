@@ -94,7 +94,7 @@ module snotra_sui::nft_staking_tests {
   #[test]
   public fun verify_signature() {
     let daily_reward: u64 = 10_000_000_000;
-    let res = nft_staking::verify_reward_sig(
+    let res = nft_staking::verify_signature(
         daily_reward,
         0u64,
         x"66f7b2553f81cc9015b4ee3ffd3b3f607b2af5398f3889319e669f9db28429f6",
@@ -113,6 +113,8 @@ module snotra_sui::nft_staking_tests {
     let daily_reward = 10_000_000_000;
     let daily_reward_sig = x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a";
     let stake_fee_amount = 0;
+    let stake_fee_amount_sig_nonce_0 = x"9b6b5bb0b1f218f29e394cd5d42fc314f54e4f40f309e76cecc999c6993fd82455275fb3254510111324a8458a1f1279220cc1a0a7c1f87a1a27836d17584c04";
+    let stake_fee_amount_sig_nonce_1 = x"400753cce3c8a10526165d92f0ed272fd63b73c3cd43ad0d0c97c3a4f0ffebb71acef611360d6d9b3533ddc713842bffd51aa179ec2dbb922ff17384cfcf3d00";
 
     let scenario = &mut scenario_val;
     {
@@ -151,7 +153,6 @@ module snotra_sui::nft_staking_tests {
         0, // flexible
         10_000_000_000,
         1000_000_000_000,
-        stake_fee_amount,
         &clock_obj,
         ctx
       );
@@ -181,6 +182,8 @@ module snotra_sui::nft_staking_tests {
         daily_reward,
         daily_reward_sig,
         coin::zero<SUI>(ctx),
+        stake_fee_amount,
+        stake_fee_amount_sig_nonce_0,
         &clock_obj,
         ctx
       );
@@ -240,6 +243,8 @@ module snotra_sui::nft_staking_tests {
         nft_a_id,
         0,
         coin::zero<SUI>(ctx),
+        stake_fee_amount,
+        stake_fee_amount_sig_nonce_1,
         &clock_obj,
         ctx
       );
@@ -315,7 +320,6 @@ module snotra_sui::nft_staking_tests {
   public fun test_admin_transfer_ownership_and_withdraw() {
     let alice = @0xA;
     let bob = @0xB;
-    let stake_fee_amount = 0;
     let scenario_val = test_scenario::begin(alice);
     let scenario = &mut scenario_val;
     {
@@ -346,7 +350,6 @@ module snotra_sui::nft_staking_tests {
         0, // lock_duration
         10_000_000_000,
         1000_000_000_000,
-        stake_fee_amount,
         &clock_obj,
         ctx
       );
