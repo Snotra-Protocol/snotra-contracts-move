@@ -10,9 +10,11 @@ module snotra_sui::nft_staking_tests {
   use sui::pay::{Self};
   use sui::dynamic_object_field as ofield;
   use sui::sui::SUI;
+  use sui::kiosk;
 
   use std::string::{Self, String};
   use std::option;
+
 
   use snotra_sui::nft_staking::{Self, PoolInfo, UserInfo, AdminCap, PlatformInfo};
 
@@ -101,6 +103,106 @@ module snotra_sui::nft_staking_tests {
         x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a",
     );
     std::debug::print<bool>(&res);
+  }
+#[test]
+  public fun test_kiosk_stake_claim_unstake() {
+    let alice = @0xA;
+    let singer_public_key = x"66f7b2553f81cc9015b4ee3ffd3b3f607b2af5398f3889319e669f9db28429f6";
+    // let bob = @0xB;
+    let scenario_val = test_scenario::begin(alice);
+    
+    let daily_reward = 10_000_000_000;
+    let daily_reward_sig = x"d13bfc40510da1199f2149dc3c33882057b16c19c03f2468decfbedae1e69ebeb595c39d8fdf8cce75d5892195fff2ad0b973610ae5b56fc536837fc4f2eb30a";
+    let stake_fee_amount = 0;
+    let stake_fee_amount_sig_nonce_0 = x"9b6b5bb0b1f218f29e394cd5d42fc314f54e4f40f309e76cecc999c6993fd82455275fb3254510111324a8458a1f1279220cc1a0a7c1f87a1a27836d17584c04";
+    let stake_fee_amount_sig_nonce_1 = x"400753cce3c8a10526165d92f0ed272fd63b73c3cd43ad0d0c97c3a4f0ffebb71acef611360d6d9b3533ddc713842bffd51aa179ec2dbb922ff17384cfcf3d00";
+
+    let scenario = &mut scenario_val;
+    {
+      let ctx = test_scenario::ctx(scenario);
+      nft_staking::init_for_testing(ctx);
+    };
+
+    let nft_a_id;
+    // init reward coin
+    test_scenario::next_tx(scenario, alice);
+    {
+      init_coin(NFT_STAKING_TESTS {}, scenario);
+    };
+
+    // create pool, mint nft
+    test_scenario::next_tx(scenario, alice);
+    let reward_coin = test_scenario::take_from_sender<Coin<NFT_STAKING_TESTS>>(scenario);
+    std::debug::print<u64>(&coin::value<NFT_STAKING_TESTS>(&reward_coin));
+    {
+      let admin_cap = test_scenario::take_from_sender<AdminCap>(scenario);
+      let platformInfo = test_scenario::take_shared<PlatformInfo>(scenario);
+      let ctx = test_scenario::ctx(scenario);
+      let clock_obj = clock::create_for_testing(ctx);
+      nft_staking::change_verify_pk(
+        &mut platformInfo,
+        &admin_cap,
+        singer_public_key,
+        ctx
+      );
+      nft_staking::create_pool<NFT_STAKING_TESTS, NftA>(
+        &admin_cap,
+        alice,
+        reward_coin,
+        1000000_000_000_000,
+        1,
+        0, // flexible
+        10_000_000_000,
+        1000_000_000_000,
+        &clock_obj,
+        ctx
+      );
+      mint_nft_a(alice, scenario);
+      clock::destroy_for_testing(clock_obj);
+      test_scenario::return_to_sender(scenario, admin_cap);
+      test_scenario::return_shared<PlatformInfo>(platformInfo);
+    };
+
+    // stake nft
+    test_scenario::next_tx(scenario, alice);
+    {
+      let poolInfo = test_scenario::take_shared<PoolInfo<NFT_STAKING_TESTS, NftA>>(scenario);
+      let platformInfo = test_scenario::take_shared<PlatformInfo>(scenario);
+      let nftA = test_scenario::take_from_sender<NftA>(scenario);
+      // save nft_a_id
+      nft_a_id = object::id(&nftA);
+
+      let ctx = test_scenario::ctx(scenario);
+      let clock_obj = clock::create_for_testing(ctx);
+
+      
+      let (kiosk, kiosk_cap) = kiosk::new(ctx);
+      kiosk::place(&mut kiosk,&kiosk_cap,  nftA);
+      
+      nft_staking::stake_kiosk<NFT_STAKING_TESTS, NftA>(
+        &mut platformInfo,
+        &mut poolInfo,
+        &mut kiosk,
+        &kiosk_cap,
+        nft_a_id,
+        daily_reward,
+        daily_reward_sig,
+        coin::zero<SUI>(ctx),
+        stake_fee_amount,
+        stake_fee_amount_sig_nonce_0,
+        &clock_obj,
+        ctx
+      );
+      test_scenario::return_shared<PoolInfo<NFT_STAKING_TESTS, NftA>>(poolInfo);
+      test_scenario::return_shared<PlatformInfo>(platformInfo);
+
+      // send empty kiosk and cap to sender
+      transfer::public_transfer(kiosk, tx_context::sender(ctx));
+      transfer::public_transfer(kiosk_cap, tx_context::sender(ctx));
+      clock::destroy_for_testing(clock_obj);
+      
+      test_scenario::end(scenario_val);
+    };
   }
 
   #[test]

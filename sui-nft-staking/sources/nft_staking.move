@@ -15,6 +15,11 @@ module snotra_sui::nft_staking {
   use sui::event;
   use sui::dynamic_object_field as ofield;
   use sui::sui::SUI;
+  use sui::package;
+
+  use sui::kiosk::{Self, Kiosk, KioskOwnerCap, PurchaseCap};
+  use sui::transfer_policy::{Self as policy, TransferPolicy, TransferPolicyCap};
+
 
   /// Errors
   const EINVALID_OWNER: u64 = 1;
@@ -29,11 +34,14 @@ module snotra_sui::nft_staking {
   const ESTILL_LOCKED: u64 = 10;
   const EPOOL_ENDED: u64 = 11;
   const EINSUFFICIENT_FEE_AMOUNT: u64 = 12;
+  const ENFT_EMPTY: u64 = 12;
+  const EKIOSK_ALREADY_LOCKED: u64 = 12;
 
   /// Constants
   const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
   /// Objects
+  struct NFT_STAKING has drop {}
   struct AdminCap has key {
     id: UID,
   }
@@ -42,15 +50,20 @@ module snotra_sui::nft_staking {
     id: UID,
     platform_fee: Balance<SUI>,
     sig_verify_pk: vector<u8>,
+    publisher: package::Publisher
   }
 
-  struct NftStakeInfo<NftT: key + store> has store {
-    nft: NftT,
+  struct NftStakeInfo<phantom NftT: key + store> has store {
+    nft_kiosk: Kiosk,
+    nft_kiosk_cap: KioskOwnerCap,
+    policy: TransferPolicy<NftT>,
+    policy_cap: TransferPolicyCap<NftT>,
+    purchase_cap: PurchaseCap<NftT>,
     stake_time: u64,
     daily_reward: u64
   }
   
-  struct UserInfo<NftT: key + store> has key, store {
+  struct UserInfo<phantom NftT: key + store> has key, store {
     id: UID,
     owner_address: address,
     last_reward_claim_time: u64,
@@ -110,14 +123,17 @@ module snotra_sui::nft_staking {
     claimed_amount: u64,
   }
 
-  fun init(ctx: &mut TxContext) {
+  fun init(witness: NFT_STAKING, ctx: &mut TxContext) {
     let sender = tx_context::sender(ctx);
+    let publisher = package::claim(witness, ctx);
+
     transfer::transfer(AdminCap { id: object::new(ctx) }, sender);
     transfer::share_object(
       PlatformInfo {
         id: object::new(ctx),
         sig_verify_pk: vector::empty<u8>(),
-        platform_fee: balance::zero<SUI>()
+        platform_fee: balance::zero<SUI>(),
+        publisher
       }
     );
   }
@@ -196,6 +212,36 @@ module snotra_sui::nft_staking {
     verify
   }
 
+  public entry fun stake_kiosk<RewardCoinT, NftT: key + store>(
+    _platform: &mut PlatformInfo,
+    _pool: &mut PoolInfo<RewardCoinT, NftT>,
+    nft_kiosk: &mut Kiosk,
+    nft_kiosk_ownercap: &KioskOwnerCap,
+    nft_id: ID,
+    _daily_reward: u64,
+    _daily_reward_signature: vector<u8>,
+    _sui_fee: Coin<SUI>,
+    _stake_fee_amount: u64,
+    _stake_fee_amount_signature: vector<u8>,
+    _clock: &Clock,
+    _ctx: &mut TxContext,
+  ) {
+    let nft_obj = kiosk::take(nft_kiosk, nft_kiosk_ownercap, nft_id);
+    stake_nft(
+      _platform,
+      _pool,
+      nft_obj,
+      _daily_reward,
+      _daily_reward_signature,
+      _sui_fee,
+      _stake_fee_amount,
+      _stake_fee_amount_signature,
+      _clock,
+      _ctx
+    );
+  }
+
+
   /// staker stake nft
   public entry fun stake_nft<RewardCoinT, NftT: key + store>(
     platform: &mut PlatformInfo,
@@ -261,9 +307,20 @@ module snotra_sui::nft_staking {
 
     let user_info = ofield::borrow_mut<address, UserInfo<NftT>>(&mut pool.id, sender);
 
+    // create a kiosk
+
+    let (policy, policy_cap) = get_policy<NftT>(platform, ctx);
+    let (new_kiosk, new_kiosk_cap) = kiosk::new(ctx);
     let nft_id = object::id(&nft_obj);
+    kiosk::place(&mut new_kiosk, &new_kiosk_cap, nft_obj);
+    let purchase_cap = kiosk::list_with_purchase_cap<NftT>(&mut new_kiosk, &new_kiosk_cap, nft_id, 0, ctx);
+
     vector::push_back(&mut user_info.nfts, NftStakeInfo<NftT> {
-      nft: nft_obj,
+      nft_kiosk: new_kiosk,
+      nft_kiosk_cap: new_kiosk_cap,
+      policy,
+      policy_cap,
+      purchase_cap,
       stake_time: cur_time,
       daily_reward
     });
@@ -337,8 +394,6 @@ module snotra_sui::nft_staking {
     assert!(nft_index < nft_count, EINVALID_INDEX);
 
     let nft_info_to_unstake = vector::borrow<NftStakeInfo<NftT>>(&user_info.nfts, nft_index);
-    let nft_id_to_unstake = object::id(&nft_info_to_unstake.nft);
-    assert!(nft_id_to_unstake == nft_id, EINVALID_NFTID_OR_INDEX);
 
     // calculate the reward
     let reward = get_reward(nft_info_to_unstake, user_info.last_reward_claim_time, cur_time, pool_end_time);
@@ -346,7 +401,22 @@ module snotra_sui::nft_staking {
 
     // remove the nft from vector
     let nft_info_to_unstake = vector::swap_remove(&mut user_info.nfts, nft_index);
-    let NftStakeInfo { nft, stake_time: _, daily_reward: _ } = nft_info_to_unstake;
+
+    let NftStakeInfo { 
+      nft_kiosk, 
+      nft_kiosk_cap, 
+      policy,
+      policy_cap,
+      purchase_cap,
+      stake_time: _, 
+      daily_reward: _ 
+    } = nft_info_to_unstake;
+
+    let (nft, request) = kiosk::purchase_with_cap(&mut nft_kiosk, purchase_cap, coin::zero<SUI>(ctx));
+    policy::confirm_request(&mut policy, request);
+
+    // check nft_id
+    assert!(object::id(&nft) == nft_id, EINVALID_NFTID_OR_INDEX);
 
     // update pool info
     pool.total_staked_count = pool.total_staked_count - 1;
@@ -363,6 +433,12 @@ module snotra_sui::nft_staking {
 
     // transfer nft to sender
     transfer::public_transfer(nft, sender);
+
+    // close kiosk
+    let sui_coin = kiosk::close_and_withdraw(nft_kiosk, nft_kiosk_cap, ctx);
+    coin::destroy_zero(sui_coin);
+    let profits = policy::destroy_and_withdraw(policy, policy_cap, ctx);
+    coin::destroy_zero(profits);
   }
 
   /// calculate reward of staked nft
@@ -497,9 +573,15 @@ module snotra_sui::nft_staking {
     pay::keep(fee_to_withdraw, ctx);
   }
 
+  public fun get_policy<T>(platform: &PlatformInfo, ctx: &mut TxContext): (TransferPolicy<T>, TransferPolicyCap<T>) {
+      let (policy, cap) = policy::new(&platform.publisher, ctx);
+      (policy, cap)
+  }
+
+
   #[test_only]
   public fun init_for_testing(ctx: &mut TxContext) {
-    init(ctx)
+    init(NFT_STAKING {}, ctx)
   }
 
   #[test_only]
