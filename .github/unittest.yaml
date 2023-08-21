@@ -1,0 +1,17 @@
+name: unit_tests
+on: [pull_request]
+jobs:
+  unit_tests:
+    name: 'Unit Tests'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL "https://aptos.dev/scripts/install_cli.py" | python3
+      - name: Run Tests
+        run: |
+          aptos move test --package-dir aptos-nft-staking
