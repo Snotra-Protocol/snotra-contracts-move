@@ -1,0 +1,22 @@
+name: 'Gas Usage'
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  check:
+    name: 'gas profile'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL "https://aptos.dev/scripts/install_cli.py" | python3
+      - name: Run Audit
+        run: |
+          aptos move test --package-dir aptos-nft-staking
